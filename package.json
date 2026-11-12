@@ -3,13 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "concurrently \"npm:server\" \"npm:client\"",
-    "server": "node server/index.js",
-    "client": "vite --host 0.0.0.0",
+"scripts": {
+    "dev": "vite",
     "build": "vite build",
+    "preview": "vite preview",
     "start": "node server/index.js"
-  },
+}
   "dependencies": {
     "@simplewebauthn/browser": "^13.1.2",
     "@simplewebauthn/server": "^13.1.2",
