@@ -1,18 +1,21 @@
+
 {
   "name": "smart-drive-guard",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-"scripts": {
-    "dev": "vite",
+  "scripts": {
+    "dev": "concurrently \"npm:server\" \"npm:client\"",
+    "server": "node server/index.js",
+    "client": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview",
     "start": "node server/index.js"
-}
+  },
   "dependencies": {
-    "@simplewebauthn/browser": "^13.1.2",
-    "@simplewebauthn/server": "^13.1.2",
-    "bcryptjs": "^2.4.3",
+    "@simplewebauthn/browser": "^13.1.0",
+    "@simplewebauthn/server": "^13.1.0",
+    "concurrently": "^9.1.2",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "multer": "^1.4.5-lts.1",
@@ -21,7 +24,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
     "vite": "^6.0.7"
   }
 }
