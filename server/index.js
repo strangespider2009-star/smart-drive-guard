@@ -16,47 +16,28 @@ import {
 } from "@simplewebauthn/server";
 
 // --------------------------------------------------
-// 1. BASIC CONFIGURATION
+// INITIAL CONFIGURATION
 // --------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 const app = express();
 
-const PORT = process.env.PORT || 3000;
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
-
-const DIST_DIR = path.resolve(__dirname, "../dist");
-const DATA_FILE = path.join(__dirname, "data.json");
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-
+const PORT = process.env.PORT || 3001;
 const RP_ID = process.env.RP_ID || "localhost";
 const ORIGIN = process.env.ORIGIN || "http://localhost:5173";
 
-if (IS_PRODUCTION) {
-  if (!process.env.SESSION_SECRET) {
-    throw new Error("SESSION_SECRET must be configured in production.");
-  }
+const isProduction = process.env.NODE_ENV === "production";
 
-  if (!process.env.RP_ID || !process.env.ORIGIN) {
-    throw new Error("RP_ID and ORIGIN must be configured in production.");
-  }
-
-  const productionOrigin = new URL(ORIGIN);
-
-  if (
-    productionOrigin.protocol !== "https:" ||
-    productionOrigin.hostname !== RP_ID
-  ) {
-    throw new Error("WebAuthn ORIGIN and RP_ID do not match.");
-  }
-
+if (isProduction) {
   app.set("trust proxy", 1);
 }
 
 // --------------------------------------------------
-// 2. DATABASE INITIALIZATION
+// DATABASE AND UPLOAD DIRECTORIES
 // --------------------------------------------------
+
+const DATA_FILE = path.join(__dirname, "data.json");
+const UPLOAD_DIR = path.join(__dirname, "uploads");
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -82,54 +63,43 @@ const readDB = () => {
 };
 
 const writeDB = (db) => {
-  const tempFile = `${DATA_FILE}.tmp`;
-
-  fs.writeFileSync(tempFile, JSON.stringify(db, null, 2));
-  fs.renameSync(tempFile, DATA_FILE);
+  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 };
 
 const id = () => crypto.randomUUID();
 
 // --------------------------------------------------
-// 3. EXPRESS MIDDLEWARE
+// MIDDLEWARE
 // --------------------------------------------------
-
-app.disable("x-powered-by");
 
 app.use(express.json({ limit: "1mb" }));
 
 app.use(
   session({
     name: "sdg.sid",
-
     secret:
       process.env.SESSION_SECRET ||
       "development-only-change-this-secret",
-
     resave: false,
     saveUninitialized: false,
-
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: IS_PRODUCTION,
+      secure: isProduction,
       maxAge: 8 * 60 * 60 * 1000
     }
   })
 );
 
-// --------------------------------------------------
-// 4. FILE UPLOAD CONFIGURATION
-// --------------------------------------------------
+// Demo uploads only.
+// Do not upload real driving licence documents.
+app.use("/uploads", express.static(UPLOAD_DIR));
 
 const upload = multer({
   dest: UPLOAD_DIR,
-
   limits: {
-    fileSize: 5 * 1024 * 1024,
-    files: 1
+    fileSize: 5 * 1024 * 1024
   },
-
   fileFilter: (_req, file, cb) => {
     const allowedTypes = [
       "image/jpeg",
@@ -137,13 +107,7 @@ const upload = multer({
       "application/pdf"
     ];
 
-    const allowedExtensions = [".jpg", ".jpeg", ".png", ".pdf"];
-
-    const extension = path.extname(file.originalname).toLowerCase();
-
-    const valid =
-      allowedTypes.includes(file.mimetype) &&
-      allowedExtensions.includes(extension);
+    const valid = allowedTypes.includes(file.mimetype);
 
     if (!valid) {
       return cb(
@@ -156,34 +120,32 @@ const upload = multer({
 });
 
 // --------------------------------------------------
-// 5. AUTHENTICATION HELPERS
+// AUTHENTICATION HELPERS
 // --------------------------------------------------
 
 function currentUser(req) {
-  if (!req.session.userId) return null;
-
-  const db = readDB();
+  if (!req.session.userId) {
+    return null;
+  }
 
   return (
-    db.users.find((u) => u.id === req.session.userId) || null
+    readDB().users.find(
+      (user) => user.id === req.session.userId
+    ) || null
   );
 }
 
 function requireAuth(req, res, next) {
-  try {
-    const user = currentUser(req);
+  const user = currentUser(req);
 
-    if (!user) {
-      return res.status(401).json({
-        error: "Please sign in."
-      });
-    }
-
-    req.user = user;
-    next();
-  } catch (error) {
-    next(error);
+  if (!user) {
+    return res.status(401).json({
+      error: "Please sign in."
+    });
   }
+
+  req.user = user;
+  next();
 }
 
 function publicUser(user) {
@@ -207,7 +169,7 @@ function ownerOnly(req, res, next) {
 }
 
 // --------------------------------------------------
-// 6. HEALTH CHECK
+// HEALTH CHECK
 // --------------------------------------------------
 
 app.get("/api/health", (_req, res) => {
@@ -218,10 +180,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 // --------------------------------------------------
-// 7. USER REGISTRATION
+// USER REGISTRATION
 // --------------------------------------------------
 
-app.post("/api/auth/register", async (req, res, next) => {
+app.post("/api/auth/register", async (req, res) => {
   try {
     const {
       name,
@@ -247,13 +209,13 @@ app.post("/api/auth/register", async (req, res, next) => {
       });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
-
     const db = readDB();
 
     if (
       db.users.some(
-        (u) => u.email.toLowerCase() === normalizedEmail
+        (user) =>
+          user.email.toLowerCase() ===
+          String(email).toLowerCase()
       )
     ) {
       return res.status(409).json({
@@ -263,8 +225,8 @@ app.post("/api/auth/register", async (req, res, next) => {
 
     const user = {
       id: id(),
-      name: String(name).trim(),
-      email: normalizedEmail,
+      name,
+      email: String(email).toLowerCase(),
       role,
       passwordHash: await bcrypt.hash(password, 12),
       passkeys: [],
@@ -272,7 +234,6 @@ app.post("/api/auth/register", async (req, res, next) => {
     };
 
     db.users.push(user);
-
     writeDB(db);
 
     req.session.userId = user.id;
@@ -281,29 +242,34 @@ app.post("/api/auth/register", async (req, res, next) => {
       user: publicUser(user)
     });
   } catch (error) {
-    next(error);
+    res.status(500).json({
+      error: "Registration failed."
+    });
   }
 });
 
 // --------------------------------------------------
-// 8. USER LOGIN
+// USER LOGIN
 // --------------------------------------------------
 
-app.post("/api/auth/login", async (req, res, next) => {
+app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-
-    const normalizedEmail = String(email || "")
-      .trim()
-      .toLowerCase();
+    const {
+      email,
+      password
+    } = req.body || {};
 
     const user = readDB().users.find(
-      (u) => u.email === normalizedEmail
+      (u) =>
+        u.email === String(email || "").toLowerCase()
     );
 
     if (
       !user ||
-      !(await bcrypt.compare(password || "", user.passwordHash))
+      !(await bcrypt.compare(
+        password || "",
+        user.passwordHash
+      ))
     ) {
       return res.status(401).json({
         error: "Incorrect email or password."
@@ -316,31 +282,22 @@ app.post("/api/auth/login", async (req, res, next) => {
       user: publicUser(user)
     });
   } catch (error) {
-    next(error);
+    res.status(500).json({
+      error: "Login failed."
+    });
   }
 });
 
 // --------------------------------------------------
-// 9. LOGOUT
+// LOGOUT AND CURRENT USER
 // --------------------------------------------------
 
-app.post("/api/auth/logout", (req, res, next) => {
-  req.session.destroy((error) => {
-    if (error) return next(error);
-
-    res.clearCookie("sdg.sid", {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: IS_PRODUCTION
-    });
-
+app.post("/api/auth/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie("sdg.sid");
     res.json({ ok: true });
   });
 });
-
-// --------------------------------------------------
-// 10. CURRENT USER
-// --------------------------------------------------
 
 app.get("/api/me", (req, res) => {
   const user = currentUser(req);
@@ -351,31 +308,28 @@ app.get("/api/me", (req, res) => {
 });
 
 // --------------------------------------------------
-// 11. PASSKEY REGISTRATION OPTIONS
+// PASSKEY REGISTRATION
 // --------------------------------------------------
 
 app.post(
   "/api/passkey/register-options",
   requireAuth,
-  async (req, res, next) => {
+  async (req, res) => {
     try {
       const options = await generateRegistrationOptions({
         rpName: "SMART DRIVE GUARD",
         rpID: RP_ID,
-
         userName: req.user.email,
         userDisplayName: req.user.name,
-
         userID: new Uint8Array(Buffer.from(req.user.id)),
-
         attestationType: "none",
-
         authenticatorSelection: {
           residentKey: "preferred",
           userVerification: "required"
         },
-
-        excludeCredentials: (req.user.passkeys || []).map((p) => ({
+        excludeCredentials: (
+          req.user.passkeys || []
+        ).map((p) => ({
           id: p.id,
           transports: p.transports
         }))
@@ -385,14 +339,12 @@ app.post(
 
       res.json(options);
     } catch (error) {
-      next(error);
+      res.status(500).json({
+        error: "Could not generate passkey options."
+      });
     }
   }
 );
-
-// --------------------------------------------------
-// 12. PASSKEY REGISTRATION VERIFICATION
-// --------------------------------------------------
 
 app.post(
   "/api/passkey/register-verify",
@@ -401,11 +353,9 @@ app.post(
     try {
       const verification = await verifyRegistrationResponse({
         response: req.body,
-
         expectedChallenge: req.session.regChallenge,
         expectedOrigin: ORIGIN,
         expectedRPID: RP_ID,
-
         requireUserVerification: true
       });
 
@@ -419,30 +369,20 @@ app.post(
       }
 
       const info = verification.registrationInfo;
-
       const db = readDB();
 
       const user = db.users.find(
         (u) => u.id === req.user.id
       );
 
-      if (!user) {
-        return res.status(404).json({
-          error: "User not found."
-        });
-      }
-
       user.passkeys ||= [];
 
       user.passkeys.push({
         id: info.credential.id,
-
         publicKey: Buffer.from(
           info.credential.publicKey
         ).toString("base64"),
-
         counter: info.credential.counter,
-
         transports: req.body.response?.transports || []
       });
 
@@ -460,130 +400,114 @@ app.post(
 );
 
 // --------------------------------------------------
-// 13. PASSKEY LOGIN OPTIONS
+// PASSKEY LOGIN
 // --------------------------------------------------
 
-app.post(
-  "/api/passkey/auth-options",
-  async (req, res, next) => {
-    try {
-      const email = String(req.body.email || "")
-        .trim()
-        .toLowerCase();
+app.post("/api/passkey/auth-options", async (req, res) => {
+  try {
+    const email = String(
+      req.body.email || ""
+    ).toLowerCase();
 
-      const user = readDB().users.find(
-        (u) => u.email === email
-      );
+    const user = readDB().users.find(
+      (u) => u.email === email
+    );
 
-      if (!user || !(user.passkeys || []).length) {
-        return res.status(404).json({
-          error:
-            "No passkey registered for this account. Sign in with password and register one first."
-        });
-      }
-
-      const options = await generateAuthenticationOptions({
-        rpID: RP_ID,
-
-        allowCredentials: user.passkeys.map((p) => ({
-          id: p.id,
-          transports: p.transports
-        })),
-
-        userVerification: "required"
-      });
-
-      req.session.authChallenge = options.challenge;
-      req.session.passkeyUserId = user.id;
-
-      res.json(options);
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-// --------------------------------------------------
-// 14. PASSKEY LOGIN VERIFICATION
-// --------------------------------------------------
-
-app.post(
-  "/api/passkey/auth-verify",
-  async (req, res) => {
-    try {
-      const db = readDB();
-
-      const user = db.users.find(
-        (u) => u.id === req.session.passkeyUserId
-      );
-
-      if (!user) {
-        return res.status(401).json({
-          error: "Passkey account not found."
-        });
-      }
-
-      const credential = (user.passkeys || []).find(
-        (p) => p.id === req.body.id
-      );
-
-      if (!credential) {
-        return res.status(401).json({
-          error: "Unknown passkey."
-        });
-      }
-
-      const verification = await verifyAuthenticationResponse({
-        response: req.body,
-
-        expectedChallenge: req.session.authChallenge,
-        expectedOrigin: ORIGIN,
-        expectedRPID: RP_ID,
-
-        credential: {
-          id: credential.id,
-
-          publicKey: new Uint8Array(
-            Buffer.from(credential.publicKey, "base64")
-          ),
-
-          counter: credential.counter,
-          transports: credential.transports
-        },
-
-        requireUserVerification: true
-      });
-
-      if (!verification.verified) {
-        return res.status(401).json({
-          error: "Passkey verification failed."
-        });
-      }
-
-      credential.counter =
-        verification.authenticationInfo.newCounter;
-
-      writeDB(db);
-
-      req.session.userId = user.id;
-
-      delete req.session.authChallenge;
-      delete req.session.passkeyUserId;
-
-      res.json({
-        user: publicUser(user),
-        verified: true
-      });
-    } catch (error) {
-      res.status(400).json({
-        error: error.message || "Passkey verification failed."
+    if (!user || !(user.passkeys || []).length) {
+      return res.status(404).json({
+        error: "No passkey registered for this account. Sign in with password and register one first."
       });
     }
+
+    const options = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      allowCredentials: user.passkeys.map((p) => ({
+        id: p.id,
+        transports: p.transports
+      })),
+      userVerification: "required"
+    });
+
+    req.session.authChallenge = options.challenge;
+    req.session.passkeyUserId = user.id;
+
+    res.json(options);
+  } catch (error) {
+    res.status(500).json({
+      error: "Could not generate authentication options."
+    });
   }
-);
+});
+
+app.post("/api/passkey/auth-verify", async (req, res) => {
+  try {
+    const db = readDB();
+
+    const user = db.users.find(
+      (u) => u.id === req.session.passkeyUserId
+    );
+
+    if (!user) {
+      return res.status(401).json({
+        error: "Passkey account not found."
+      });
+    }
+
+    const credential = (user.passkeys || []).find(
+      (p) => p.id === req.body.id
+    );
+
+    if (!credential) {
+      return res.status(401).json({
+        error: "Unknown passkey."
+      });
+    }
+
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: req.session.authChallenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+      credential: {
+        id: credential.id,
+        publicKey: new Uint8Array(
+          Buffer.from(credential.publicKey, "base64")
+        ),
+        counter: credential.counter,
+        transports: credential.transports
+      },
+      requireUserVerification: true
+    });
+
+    if (!verification.verified) {
+      return res.status(401).json({
+        error: "Passkey verification failed."
+      });
+    }
+
+    credential.counter =
+      verification.authenticationInfo.newCounter;
+
+    writeDB(db);
+
+    req.session.userId = user.id;
+
+    delete req.session.authChallenge;
+    delete req.session.passkeyUserId;
+
+    res.json({
+      user: publicUser(user),
+      verified: true
+    });
+  } catch (error) {
+    res.status(400).json({
+      error: error.message || "Passkey verification failed."
+    });
+  }
+});
 
 // --------------------------------------------------
-// 15. DASHBOARD
+// DASHBOARD
 // --------------------------------------------------
 
 app.get("/api/dashboard", requireAuth, (req, res) => {
@@ -624,7 +548,7 @@ app.get("/api/dashboard", requireAuth, (req, res) => {
 });
 
 // --------------------------------------------------
-// 16. ADD VEHICLE
+// VEHICLE MANAGEMENT
 // --------------------------------------------------
 
 app.post(
@@ -655,7 +579,6 @@ app.post(
     };
 
     db.vehicles.push(vehicle);
-
     writeDB(db);
 
     res.json({ vehicle });
@@ -663,7 +586,7 @@ app.post(
 );
 
 // --------------------------------------------------
-// 17. ADD DRIVER OR FAMILY MEMBER
+// DRIVER MANAGEMENT
 // --------------------------------------------------
 
 app.post(
@@ -715,88 +638,32 @@ app.post(
         b.ownerId === req.user.id
     );
 
-    const driverId = id();
-
     const driver = {
-      id: driverId,
+      id: id(),
       ownerId: req.user.id,
       vehicleId,
-
       name,
       email: email || "",
       phone: phone || "",
-
       licenceNumber,
       expiryDate,
-
       relationship: relationship || "",
-
       kind: kind === "family" ? "family" : "driver",
-
-      // Licence files are accessed through an
-      // authenticated endpoint, not public static hosting.
       licenceFile: req.file
-        ? `/api/drivers/${driverId}/licence`
+        ? `/uploads/${req.file.filename}`
         : null,
-
       biometricProfileId: profile?.id || null,
-
       ownerApproved: false,
       status: "pending",
-
       createdAt: new Date().toISOString()
     };
 
     db.drivers.push(driver);
-
     writeDB(db);
 
     res.json({ driver });
   }
 );
-
-// --------------------------------------------------
-// 18. SECURE LICENCE FILE ACCESS
-// --------------------------------------------------
-
-app.get(
-  "/api/drivers/:id/licence",
-  requireAuth,
-  ownerOnly,
-  (req, res) => {
-    const db = readDB();
-
-    const driver = db.drivers.find(
-      (d) =>
-        d.id === req.params.id &&
-        d.ownerId === req.user.id
-    );
-
-    if (!driver || !driver.licenceFile) {
-      return res.status(404).json({
-        error: "Licence file not found."
-      });
-    }
-
-    const filename = path.basename(driver.licenceFile);
-
-    const filePath = path.join(UPLOAD_DIR, filename);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: "Uploaded file is unavailable."
-      });
-    }
-
-    res.setHeader("Cache-Control", "private, no-store");
-
-    res.sendFile(filePath);
-  }
-);
-
-// --------------------------------------------------
-// 19. DRIVER APPROVAL
-// --------------------------------------------------
 
 app.patch(
   "/api/drivers/:id/approval",
@@ -829,10 +696,6 @@ app.patch(
   }
 );
 
-// --------------------------------------------------
-// 20. DELETE DRIVER
-// --------------------------------------------------
-
 app.delete(
   "/api/drivers/:id",
   requireAuth,
@@ -840,29 +703,12 @@ app.delete(
   (req, res) => {
     const db = readDB();
 
-    const driver = db.drivers.find(
-      (d) =>
-        d.id === req.params.id &&
-        d.ownerId === req.user.id
-    );
-
-    if (!driver) {
-      return res.status(404).json({
-        error: "Driver not found."
-      });
-    }
-
-    if (driver.licenceFile) {
-      const filename = path.basename(driver.licenceFile);
-      const filePath = path.join(UPLOAD_DIR, filename);
-
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    }
-
     db.drivers = db.drivers.filter(
-      (d) => d.id !== req.params.id
+      (d) =>
+        !(
+          d.id === req.params.id &&
+          d.ownerId === req.user.id
+        )
     );
 
     writeDB(db);
@@ -872,7 +718,7 @@ app.delete(
 );
 
 // --------------------------------------------------
-// 21. ADD DUMMY BIOMETRIC PROFILE
+// BIOMETRIC DEMO MANAGEMENT
 // --------------------------------------------------
 
 app.post(
@@ -898,29 +744,20 @@ app.post(
     const profile = {
       id: id(),
       ownerId: req.user.id,
-
       profileName,
-
       fingerprintRegistered: !!fingerprintRegistered,
       faceRegistered: !!faceRegistered,
       simulatedMatch: !!simulatedMatch,
-
       status: "active",
-
       createdAt: new Date().toISOString()
     };
 
     db.biometrics.push(profile);
-
     writeDB(db);
 
     res.json({ profile });
   }
 );
-
-// --------------------------------------------------
-// 22. UPDATE BIOMETRIC PROFILE
-// --------------------------------------------------
 
 app.patch(
   "/api/biometrics/:id",
@@ -941,15 +778,13 @@ app.patch(
       });
     }
 
-    const allowedFields = [
+    for (const key of [
       "profileName",
       "fingerprintRegistered",
       "faceRegistered",
       "simulatedMatch",
       "status"
-    ];
-
-    for (const key of allowedFields) {
+    ]) {
       if (key in req.body) {
         profile[key] = req.body[key];
       }
@@ -961,10 +796,6 @@ app.patch(
   }
 );
 
-// --------------------------------------------------
-// 23. DELETE BIOMETRIC PROFILE
-// --------------------------------------------------
-
 app.delete(
   "/api/biometrics/:id",
   requireAuth,
@@ -974,8 +805,10 @@ app.delete(
 
     db.biometrics = db.biometrics.filter(
       (p) =>
-        !(p.id === req.params.id &&
-          p.ownerId === req.user.id)
+        !(
+          p.id === req.params.id &&
+          p.ownerId === req.user.id
+        )
     );
 
     writeDB(db);
@@ -985,7 +818,7 @@ app.delete(
 );
 
 // --------------------------------------------------
-// 24. DEMONSTRATION ACCESS CHECK
+// DEMONSTRATION ACCESS CHECK
 // --------------------------------------------------
 
 app.post(
@@ -1030,14 +863,13 @@ app.post(
 
     const licenceResult =
       !!driver &&
-      new Date(driver.expiryDate + "T23:59:59") >= new Date();
+      new Date(driver.expiryDate + "T23:59:59") >=
+        new Date();
 
     const ownerApproval = !!driver?.ownerApproved;
 
     const granted =
       !!vehicle &&
-      !!driver &&
-      driver.vehicleId === vehicle.id &&
       biometricResult &&
       licenceResult &&
       ownerApproval;
@@ -1045,21 +877,16 @@ app.post(
     const log = {
       id: id(),
       ownerId: req.user.id,
-
       driverId,
       vehicleId,
-
       biometricResult,
       licenceResult,
       ownerApproval,
-
       accessGranted: granted,
-
       createdAt: new Date().toISOString()
     };
 
     db.logs.push(log);
-
     writeDB(db);
 
     res.json({
@@ -1067,7 +894,6 @@ app.post(
       licenceResult,
       ownerApproval,
       accessGranted: granted,
-
       logic: [
         biometricResult,
         licenceResult,
@@ -1078,78 +904,23 @@ app.post(
 );
 
 // --------------------------------------------------
-// 25. UNKNOWN API ROUTES
+// ERROR HANDLER
 // --------------------------------------------------
 
-app.use("/api", (_req, res) => {
-  res.status(404).json({
-    error: "API endpoint not found."
+app.use((err, _req, res, _next) => {
+  console.error("Server error:", err);
+
+  res.status(400).json({
+    error: err.message || "Request failed."
   });
 });
 
 // --------------------------------------------------
-// 26. SERVE REACT PRODUCTION BUILD
-// --------------------------------------------------
-
-app.use(
-  express.static(DIST_DIR, {
-    index: false
-  })
-);
-
-// React client-side routing fallback.
-// Express 4 syntax.
-
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/api/")) {
-    return next();
-  }
-
-  const indexFile = path.join(DIST_DIR, "index.html");
-
-  if (!fs.existsSync(indexFile)) {
-    return res.status(503).send(
-      "Frontend build not found. Run npm run build."
-    );
-  }
-
-  res.sendFile(indexFile);
-});
-
-// --------------------------------------------------
-// 27. GLOBAL ERROR HANDLER
-// --------------------------------------------------
-
-app.use((err, req, res, _next) => {
-  console.error(err);
-
-  if (res.headersSent) return;
-
-  const status =
-    err instanceof multer.MulterError ? 400 : 500;
-
-  res.status(status).json({
-    error:
-      status === 400
-        ? err.message
-        : "Internal server error."
-  });
-});
-
-// --------------------------------------------------
-// 28. START SERVER - ONLY ONCE
+// START SERVER - ONLY ONE LISTENER
 // --------------------------------------------------
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `SMART DRIVE GUARD running on port ${PORT}`
-  );
-
-  console.log(
-    `Environment: ${IS_PRODUCTION ? "production" : "development"}`
-  );
-
-  console.log(
-    `Frontend build: ${fs.existsSync(path.join(DIST_DIR, "index.html")) ? "available" : "not found"}`
+    `SMART DRIVE GUARD API listening on port ${PORT}`
   );
 });
